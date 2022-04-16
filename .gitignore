@@ -3,3 +3,4 @@ vs_debug_solution/.vs/
 *.lib
 *.exe
 ols.json
+.vscode/
