@@ -28,7 +28,7 @@ url_free :: proc(url: ^Url) {
 // Make sure to use url_free() on the returned url, even if Url_Parsing_Error is not None
 //
 // Loosely based on https://github.com/python/cpython/blob/f5542ecf6d340eaaf86f31d90a7a7ff7a99f25a2/Lib/urllib/parse.py#L437
-url_parse :: proc(to_parse: string, default_scheme: string = "https") -> (^Url, Request_Preparation_Error) {
+url_parse :: proc(to_parse: string, default_scheme: string = "https") -> (^Url, Http_Error) {
     to_parse_s := to_parse[:]
     url := new(Url)
 
