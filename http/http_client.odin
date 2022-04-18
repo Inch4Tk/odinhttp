@@ -4,6 +4,8 @@ import "core:time"
 import "core:fmt"
 import "core:strings"
 import "core:slice"
+import "core:c"
+import "core:log"
 import net "vendor:sdl2/net"
 
 HTTP_METHODS := [7]string{"GET", "OPTIONS", "HEAD", "POST", "PUT", "PATCH", "DELETE"}
@@ -17,30 +19,6 @@ Http_Method :: enum {
     Patch,
     Delete,
 }
-
-Session_Error :: enum {
-    None,
-    SDL2Init_Failed,
-    Socket_Set_Creation_Error,
-}
-
-Request_Error :: enum {
-    None,
-    Could_Not_Resolve_Host,
-    Socket_Creation_Error,
-    Socket_Send_Error,
-    Unknown_Socket_Error,
-    Host_Disconnected,
-    Timeout,
-}
-
-Request_Preparation_Error :: enum {
-    None,
-    Url_Invalid_Scheme,
-    Url_Invalid_Ipv6,
-    Url_Invalid_Port,
-}
-
 
 method_to_string :: proc(method: Http_Method) -> string {
     return HTTP_METHODS[int(method)]
@@ -72,6 +50,7 @@ Request :: struct {
     buffer:     []u8,
     timeout_ms: i32,
     keep_alive: bool,
+    use_https: bool,
 }
 
 Response :: struct {
@@ -79,27 +58,70 @@ Response :: struct {
     elapsed_ms: u32,
 }
 
+Socket :: struct {
+    socket: net.TCPsocket,
+    ssl:    SSL,
+}
 
 Session :: struct {
-    connections: map[string]net.TCPsocket,
+    connections: map[string]Socket,
     socket_set:  net.SocketSet,
+    ssl_ctx:     SSL_CTX,
+}
+
+@(private)
+FullSDLTCPSocket :: struct {
+    // Expose full sdl sockets, since we need to get the internal socket for ssl
+    // https://github.com/SDL-mirror/SDL_net/blob/master/SDLnetTCP.c
+    ready: c.int,
+    channel: SOCKET,
+    remoteAddress: net.IPaddress,
+    localAddress: net.IPaddress,
+    sFlag: c.int,
 }
 
 // Make and initialize a new session. The session stores keep-alive connections (default in http/1.1)
 // and handles sdl2 init and teardown.
-make_session :: proc() -> (^Session, Session_Error) {
+make_session :: proc() -> (^Session, Http_Error) {
+    // SDL Init
     success := net.Init()
     if success == -1 {
         return nil, .SDL2Init_Failed
     }
+
     socket_set := net.AllocSocketSet(10)
     if socket_set == nil {
         return nil, .Socket_Set_Creation_Error
     }
 
+    // OpenSSL Init
+    ctx : SSL_CTX
+    if SSL_SUPPORT {
+        OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nil)
+        OPENSSL_config(nil)
+
+        ctx = SSL_CTX_new(TLS_client_method())
+        if ctx == nil {
+            return nil, .SSL_CTX_New_Failed
+        }
+
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nil)
+        SSL_CTX_set_verify_depth(ctx, 4)
+        SSL_CTX_set_options(ctx,
+            SSL_OP_NO_COMPRESSION | SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION,
+        )
+        SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION)
+
+        if !load_system_certs(ctx) {
+            return nil, .SSL_Loading_Certs_Failed
+        }
+    }
+
+    // Store everything in our session struct
     sess := new(Session)
-    sess.connections = make(map[string]net.TCPsocket)
+    sess.connections = make(map[string]Socket)
     sess.socket_set = socket_set
+    sess.ssl_ctx = ctx
 
     return sess, .None
 }
@@ -108,11 +130,16 @@ make_session :: proc() -> (^Session, Session_Error) {
 delete_session :: proc(sess: ^Session) {
     net.FreeSocketSet(sess.socket_set)
     for _, socket in sess.connections {
-        net.TCP_Close(socket)
+        net.TCP_Close(socket.socket)
+        if socket.ssl != nil {
+            SSL_shutdown(socket.ssl)
+            SSL_free(socket.ssl)
+        }
     }
     net.Quit()
     delete(sess.connections)
     free(sess)
+    // openssl will deinit by itself since version 1.1.0
 }
 
 // Prepare a request before sending it
@@ -130,10 +157,10 @@ request_prepare :: proc(
     string_data: string = "",
     binary_data: []u8 = nil,
     cookies: map[string]string = nil,
-    timeout_ms: i32 = 10000,
+    timeout_ms: i32 = 60000,
 ) -> (
     ^Request,
-    Request_Preparation_Error,
+    Http_Error,
 ) {
     assert(
         timeout_ms >= 0,
@@ -190,12 +217,13 @@ request_prepare :: proc(
     // Build Body
 
 
-    fmt.println(strings.to_string(builder))
+    log.info(strings.to_string(builder))
     req := new(Request)
     req.url = url
     req.buffer = slice.clone(builder.buf[:])
     req.timeout_ms = timeout_ms
     req.keep_alive = should_keep_alive
+    req.use_https = url.scheme == "https" ? true : false
 
     return req, .None
 }
@@ -207,7 +235,7 @@ request_delete :: proc(req: Request) {
 }
 
 // Send a previously prepared request object
-request :: proc(sess: ^Session, req: ^Request) -> (res: ^Response, error: Request_Error) {
+request :: proc(sess: ^Session, req: ^Request) -> (res: ^Response, error: Http_Error) {
     start := time.now()
 
     binary_res: u8
@@ -219,7 +247,7 @@ request :: proc(sess: ^Session, req: ^Request) -> (res: ^Response, error: Reques
             succesful_reuse = true
         } else if err == .Host_Disconnected {
             // Reuse was not successful, host has closed the connection
-
+            handle_host_disconnect(sess, socket, req.url.hostname)
         } else {
             // Some other unexpected error happened, report to user
             return nil, .Unknown_Socket_Error
@@ -229,29 +257,89 @@ request :: proc(sess: ^Session, req: ^Request) -> (res: ^Response, error: Reques
 
     // Make new connection if we could not reuse the previous connection
     if !succesful_reuse {
+        // Defered failure handler to make cleanup easier
+        socket : net.TCPsocket
+        ssl : SSL
+        add_socket_success : i32 = -1
+        failed_somewhere := false
+        defer if failed_somewhere {
+            if ssl != nil {
+                SSL_shutdown(ssl)
+                SSL_free(ssl)
+            }
+            if add_socket_success != -1 && socket != nil {
+                net.TCP_DelSocket(sess.socket_set, socket)
+            }
+            if socket != nil {
+                net.TCP_Close(socket)
+            }
+        }
+
+        // Socket creation etc
         ipaddr := net.IPaddress{}
         chost := strings.clone_to_cstring(req.url.hostname)
         defer delete(chost)
-        success := net.ResolveHost(&ipaddr, chost, req.url.port)
-        if success == -1 {
+        resolve_success := net.ResolveHost(&ipaddr, chost, req.url.port)
+        if resolve_success == -1 {
+            failed_somewhere = true
             return nil, .Could_Not_Resolve_Host
         }
 
-        socket := net.TCP_Open(&ipaddr)
+        socket = net.TCP_Open(&ipaddr)
         if socket != nil {
+            failed_somewhere = true
             return nil, .Socket_Creation_Error
         }
 
-        success = net.TCP_AddSocket(sess.socket_set, socket)
-        if success == -1 {
+        add_socket_success = net.TCP_AddSocket(sess.socket_set, socket)
+        if add_socket_success == -1 {
+            failed_somewhere = true
             return nil, .Socket_Creation_Error
         }
-        binary_res := handle_protocol(sess, socket, req) or_return
+
+        // Optional SSL handshake
+        if (SSL_SUPPORT && req.use_https) {
+            failed_somewhere = true
+            ssl = SSL_new(sess.ssl_ctx)
+            if ssl == nil {
+                failed_somewhere = true
+                return nil, .SSL_Connection_Failed
+            }
+            full_socket := transmute(^FullSDLTCPSocket)socket
+            // https://stackoverflow.com/questions/1953639/is-it-safe-to-cast-socket-to-int-under-win64
+            // so actually not allowed, buuut no choice if we want to use openssl
+            // and it seems to be the standard practice anyways
+            channel := c.int(full_socket.channel)
+            bio := BIO_new_socket(channel, BIO_NOCLOSE)
+            if bio == nil {
+                failed_somewhere = true
+                return nil, .SSL_Connection_Failed
+            }
+
+            SSL_set_bio(ssl, bio, bio)
+            sethost_result := SSL_set_tlsext_host_name(ssl, chost)
+            if sethost_result == 0 {
+                failed_somewhere = true
+                return nil, .SSL_Connection_Failed
+            }
+
+            ssl_handshake_result := SSL_connect(ssl) // cert verification happens here
+            if ssl_handshake_result <= 0 {
+                failed_somewhere = true
+                err := SSL_get_error(ssl, ssl_handshake_result)
+                log.errorf("SSL Error code %i", err)
+                return nil, .SSL_Verification_Failed
+            }
+        }
+
+        // The actual sending part
+        sslsocket := Socket{socket, ssl}
+        binary_res := handle_protocol(sess, sslsocket, req) or_return
 
         if req.keep_alive {
-            sess.connections[req.url.hostname] = socket
+            sess.connections[req.url.hostname] = sslsocket
         } else {
-            net.TCP_Close(socket)
+            handle_host_disconnect(sess, sslsocket, "")
         }
     }
 
@@ -262,21 +350,29 @@ request :: proc(sess: ^Session, req: ^Request) -> (res: ^Response, error: Reques
 }
 
 @(private)
-handle_host_disconnect :: proc(sess: ^Session, socket: net.TCPsocket, hostname: string) {
+handle_host_disconnect :: proc(sess: ^Session, socket: Socket, hostname: string) {
+    using socket
+    if ssl != nil {
+        SSL_shutdown(ssl)
+        SSL_free(ssl)
+    }
     net.TCP_DelSocket(sess.socket_set, socket)
     net.TCP_Close(socket)
-    delete_key(&sess.connections, hostname)
+    if hostname != "" {
+        delete_key(&sess.connections, hostname)
+    }
 }
 
 @(private)
-handle_protocol :: proc(sess: ^Session, socket: net.TCPsocket, req: ^Request) -> (
+handle_protocol :: proc(sess: ^Session, socket: Socket, req: ^Request) -> (
     []u8,
-    Request_Error,
+    Http_Error,
 ) {
+    using socket
     // Check if we have anything on our socket
     numready := net.CheckSockets(sess.socket_set, 0)
     if numready == -1 {
-        fmt.println("Unknown system level socket error: %s", net.GetError())
+        log.errorf("Unknown system level socket error: %s", net.GetError())
         return nil, .Unknown_Socket_Error
     } else if numready > 0 && net.SocketReady(socket) {
         // This can only be a disconnection in http/1.1, since we handle the whole
@@ -291,7 +387,7 @@ handle_protocol :: proc(sess: ^Session, socket: net.TCPsocket, req: ^Request) ->
     start_time := time.now()
     result := net.TCP_Send(socket, slice.as_ptr(req.buffer), i32(len(req.buffer)))
     if result < i32(len(req.buffer)) {
-        fmt.println("SDLNet_TCP_Send %s", net.GetError())
+        log.errorf("SDLNet_TCP_Send %s", net.GetError())
         return nil, .Socket_Send_Error
     }
 
@@ -317,7 +413,7 @@ handle_protocol :: proc(sess: ^Session, socket: net.TCPsocket, req: ^Request) ->
             to_delete := make([dynamic]string)
             defer delete(to_delete)
             for k, s in sess.connections {
-                if net.SocketReady(s) {
+                if net.SocketReady(s.socket) {
                     append(&to_delete, k)
                 }
             }
