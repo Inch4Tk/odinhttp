@@ -1,6 +1,8 @@
 build/
 vs_debug_solution/.vs/
+lib/
 *.lib
 *.exe
+*.obj
 ols.json
 .vscode/
