@@ -3,11 +3,6 @@ This library provides a lightweight http client written in Odin. The underlying 
 
 
 ## Installation
-**Windows Note:** Before running your program make sure the following dlls are somewhere on the environment path or in the working directory:
-- SDL2.dll (from odin/vendor/sdl2)
-- SDL2_net.dll (from odin/vendor/sdl2/net)
-- If you want to send https requests, see SSL Support section
-
 ```
 // inside odin/shared
 // git clone -b <tagname> <repository>
@@ -15,9 +10,18 @@ This library provides a lightweight http client written in Odin. The underlying 
 import http "shared:odinhttp/http"
 
 // alternatively to run tests, inside odinhttp folder:
-// for some reason the builtin test does not work (?)
+// for some reason the builtin odin (dev-2022-04) test command does not work
 odin run test
 ```
+
+### Dependency Notes:
+For Windows (find and add the following dlls to path or directory):
+- SDL2.dll (from odin/vendor/sdl2)
+- SDL2_net.dll (from odin/vendor/sdl2/net)
+For Unix:
+- sudo apt-get install libsdl2-2.0
+
+**Important:** Then follow the instructions in the SSL section to either install OpenSSL oder compile without SSL support.
 
 ## Example
 For a more complete example check example/example.odin
@@ -116,8 +120,8 @@ Content-Length header will be set automatically based on the body size
 If you want SSL support you need a valid OpenSSL distribution in your system. 
 The recommended version is 3.0.2 (latest as of 2022/04/18), which is the version used for developing. Any 3.0.x version should work, no other versions are tested.
 
-If you want to build with ssl support add the following to your build command:
-```-define:SSL_SUPPORT=true```
+If you want to build without ssl support add the following to your build command:
+```-define:SSL_SUPPORT=false```
 If you have ssl support disabled all calls with "https" as schema will unpredictably fail or crash.
 
 
