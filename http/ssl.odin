@@ -53,6 +53,9 @@ SSL_ERROR_WANT_ASYNC_JOB :: 10
 SSL_ERROR_WANT_CLIENT_HELLO_CB :: 11
 SSL_ERROR_WANT_RETRY_VERIFY :: 12
 
+TLSEXT_NAMETYPE_host_name :: 0
+SSL_CTRL_SET_TLSEXT_HOSTNAME :: 55
+
 BIO_NOCLOSE: c.int : 0x00
 BIO_CLOSE: c.int : 0x01
 
@@ -94,7 +97,7 @@ when SSL_SUPPORT {
 		SSL_new :: proc(ctx: SSL_CTX) -> SSL ---
 		SSL_free :: proc(ssl: SSL) ---
 		SSL_set_bio :: proc(ssl: SSL, rbio: SSL_BIO, wbio: SSL_BIO) ---
-		SSL_set_tlsext_host_name :: proc(ssl: SSL, name: cstring) -> c.int ---
+		SSL_ctrl :: proc(ssl: SSL, cmd: c.int, larg: c.long, parg: rawptr) -> c.long ---
 		SSL_connect :: proc(ssl: SSL) -> c.int ---
 		SSL_shutdown :: proc(ssl: SSL) -> c.int ---
 		SSL_get_error :: proc(ssl: SSL, ret: c.int) -> c.int ---
@@ -133,7 +136,7 @@ when SSL_SUPPORT {
 	SSL_new :: proc(ctx: SSL_CTX) -> SSL {return nil}
 	SSL_free :: proc(ssl: SSL) {}
 	SSL_set_bio :: proc(ssl: SSL, rbio: SSL_BIO, wbio: SSL_BIO) {}
-	SSL_set_tlsext_host_name :: proc(ssl: SSL, name: cstring) -> c.int {return 0}
+	SSL_ctrl :: proc(ssl: SSL, cmd: c.int, larg: c.long, parg: rawptr) -> c.long {return 0}
 	SSL_connect :: proc(ssl: SSL) -> c.int {return 0}
 	SSL_shutdown :: proc(ssl: SSL) -> c.int {return 0}
 	SSL_get_error :: proc(ssl: SSL, ret: c.int) -> c.int {return 0}

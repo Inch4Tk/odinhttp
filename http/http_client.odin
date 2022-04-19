@@ -64,17 +64,17 @@ make_session :: proc() -> (sess: ^Session, err: Http_Error) {
 	if success == -1 {
 		return nil, .SDL2Init_Failed
 	}
-    defer if err != .None {
-        net.Quit()
-    }
+	defer if err != .None {
+		net.Quit()
+	}
 
 	socket_set := net.AllocSocketSet(10)
 	if socket_set == nil {
 		return nil, .Socket_Set_Creation_Error
 	}
-    defer if err != .None {
-        net.FreeSocketSet(socket_set)
-    }
+	defer if err != .None {
+		net.FreeSocketSet(socket_set)
+	}
 
 	// OpenSSL Init
 	ctx: SSL_CTX
@@ -157,12 +157,7 @@ request_prepare :: proc(
 	) // This is just a rough size estimate
 	defer strings.destroy_builder(&builder)
 
-	fmt.sbprintf(
-		&builder,
-		"%s %s",
-		method_to_string(method),
-		purl.path != "" ? purl.path : "/",
-	)
+	fmt.sbprintf(&builder, "%s %s", method_to_string(method), purl.path != "" ? purl.path : "/")
 	if purl.query != "" {
 		fmt.sbprintf(&builder, "?%s", purl.query)
 	}
@@ -339,7 +334,15 @@ request :: proc(sess: ^Session, req: ^Request) -> (res: ^Response, error: Http_E
 			}
 
 			SSL_set_bio(ssl, bio, bio)
-			sethost_result := SSL_set_tlsext_host_name(ssl, chost)
+			// this call should be SSL_set_tlsext_host_name which is a macro,
+			// so we can't bind to it. The macro directly resolves to this:
+			// https://github.com/openssl/openssl/blob/518ce65d93692ecd4c004b96b47d58da8e5922ea/include/openssl/tls1.h#L259
+			sethost_result := SSL_ctrl(
+				ssl,
+				SSL_CTRL_SET_TLSEXT_HOSTNAME,
+				TLSEXT_NAMETYPE_host_name,
+				transmute(rawptr)(chost),
+			)
 			if sethost_result == 0 {
 				return nil, .SSL_Connection_Failed
 			}
@@ -408,10 +411,10 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
 	send(sock, req.buffer) or_return
 
 	for {
-		elapsed := i32(time.duration_milliseconds(time.since(start_time)))
-		new_timeout := req.timeout_ms > 0 ? max(0, req.timeout_ms - elapsed) : req.timeout_ms
 		// Loop, but realistically expect to go only once in loop as long as no other
 		// socket gets disconnected
+		elapsed := i32(time.duration_milliseconds(time.since(start_time)))
+		new_timeout := req.timeout_ms > 0 ? max(0, req.timeout_ms - elapsed) : req.timeout_ms
 		numready := net.CheckSockets(sess.socket_set, u32(new_timeout))
 		if numready == -1 {
 			return nil, .Unknown_Socket_Error
@@ -426,7 +429,7 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
 			defer bytes.buffer_destroy(&growbuffer)
 			// Make sure to clean up if we get some error
 			defer if err != .None {
-				log.errorf("Failed parsing response at following line %s", line_buffer)
+				log.errorf("Failed parsing response at following line: '%s'", line_buffer)
 				response_delete(res)
 				res = nil
 			}
@@ -467,7 +470,7 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
 			if chunked {
 				// Hard case: Chunked transport encoding, load data in chunks and merge them
 				all_chunks := bytes.Buffer{}
-				chunk_buffer : []u8
+				chunk_buffer: []u8
 				defer bytes.buffer_destroy(&all_chunks)
 				defer delete(chunk_buffer)
 				for {
@@ -605,10 +608,8 @@ read_line :: proc(sock: Socket, buffer: ^[dynamic]u8) -> Http_Error {
 @(private)
 read_byte :: proc(sock: Socket, b: ^u8) -> Http_Error {
 	if SSL_SUPPORT && sock.ssl != nil {
-		if SSL_pending(sock.ssl) > 0 {
-			SSL_read(sock.ssl, b, 1)
-			return .None
-		}
+		SSL_read(sock.ssl, b, 1)
+		return .None
 	} else {
 		net.TCP_Recv(sock.socket, b, 1)
 		return .None
@@ -619,10 +620,8 @@ read_byte :: proc(sock: Socket, b: ^u8) -> Http_Error {
 @(private)
 read_bytes :: proc(sock: Socket, b: rawptr, len: i32) -> Http_Error {
 	if SSL_SUPPORT && sock.ssl != nil {
-		if SSL_pending(sock.ssl) > 0 {
-			SSL_read(sock.ssl, b, len)
-			return .None
-		}
+		SSL_read(sock.ssl, b, len)
+		return .None
 	} else {
 		net.TCP_Recv(sock.socket, b, len)
 		return .None
@@ -651,18 +650,15 @@ parse_response_line :: proc(res: ^Response, line: []u8) -> Http_Error {
 		if char == '/' && mode == 0 {
 			v_start = i + 1
 			mode += 1
-		}
-		else if char == ' ' && mode == 1 {
+		} else if char == ' ' && mode == 1 {
 			v_end = i
 			sc_start = i + 1
 			mode += 1
-		}
-		else if char == ' ' && mode == 2 {
+		} else if char == ' ' && mode == 2 {
 			sc_end = i
 			r_start = i + 1
 			mode += 1
-		}
-		else if char == '\r' && mode == 3 {
+		} else if char == '\r' && mode == 3 {
 			r_end = i
 			break
 		}

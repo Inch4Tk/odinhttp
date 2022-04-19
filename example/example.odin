@@ -6,7 +6,7 @@ import json "core:encoding/json"
 import http "../http"
 
 log_proc :: proc(data: rawptr, level: log.Level, text: string, options: log.Options, location := #caller_location) {
-    fmt.printf("[%s] %s: %s", level, location, text)
+    fmt.printf("[%s] %s: %s\n", level, location, text)
 }
 
 example_proc :: proc() -> http.Http_Error {
