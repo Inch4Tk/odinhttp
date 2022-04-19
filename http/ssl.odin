@@ -97,6 +97,9 @@ when SSL_SUPPORT {
         SSL_connect :: proc(ssl: SSL) -> c.int ---
         SSL_shutdown :: proc(ssl: SSL) -> c.int ---
         SSL_get_error :: proc(ssl: SSL, ret: c.int) -> c.int ---
+        SSL_read :: proc(ssl: SSL, buf: rawptr, num: c.int) -> c.int ---
+        SSL_write :: proc(ssl: SSL, buf: rawptr, num: c.int) -> c.int ---
+        SSL_pending :: proc(ssl: SSL) -> c.int ---
 
         d2i_X509 :: proc(a: ^X509, ppin: ^^c.uchar, length: c.long) -> X509 ---
         X509_STORE_add_cert :: proc(ctx: X509_STORE, x: X509) -> c.int ---
@@ -133,6 +136,9 @@ when SSL_SUPPORT {
     SSL_connect :: proc(ssl: SSL) -> c.int {return 0}
     SSL_shutdown :: proc(ssl: SSL) -> c.int {return 0}
     SSL_get_error :: proc(ssl: SSL, ret: c.int) -> c.int {return 0}
+    SSL_read :: proc(ssl: SSL, buf: rawptr, num: c.int) -> c.int {return 0}
+    SSL_write :: proc(ssl: SSL, buf: rawptr, num: c.int) -> c.int {return 0}
+    SSL_pending :: proc(ssl: SSL) -> c.int {return 0}
 
     d2i_X509 :: proc(a: ^X509, ppin: ^^c.uchar, length: c.long) -> X509 {return nil}
     X509_STORE_add_cert :: proc(ctx: X509_STORE, x: X509) -> c.int {return 0}
@@ -209,8 +215,3 @@ when ODIN_OS == .Windows && SSL_SUPPORT {
         return true
     }
 }
-
-// #include <openssl/err.h>
-// #include <openssl/evp.h>
-// #include <openssl/ssl.h>
-// #include <openssl/x509v3.h>
