@@ -125,6 +125,8 @@ delete_session :: proc(sess: ^Session) {
 // This function will allocate a new request with the default allocator.
 // The user is responsible for freeing the allocated memory of the returned request
 // (e.g. using request_delete()).
+// Make sure you take care to delete all supplied headers/params/cookies in the maps you supplied yourself
+// deleting the request does not touch those.
 //
 // Timeout_ms, -1 = wait infinitely, 0 = no wait (not a good idea)
 request_prepare :: proc(
@@ -173,46 +175,55 @@ request_prepare :: proc(
     } else {
         host = fmt.tprintf("%s", url.hostname)
     }
-    fmt.sbprintf(&builder, "Host: %s\r\n", host)
+    fmt.sbprintf(&builder, "host: %s\r\n", host)
     fmt.sbprintf(
         &builder,
-        "User-Agent: odinhttp/%s.%s.%s\r\n",
+        "user-agent: odinhttp/%s.%s.%s\r\n",
         ODINHTTP_VERSION_MAJOR,
         ODINHTTP_VERSION_MINOR,
         ODINHTTP_VERSION_PATCH,
     )
 
-    if !("Accept" in headers) {
-        fmt.sbprintf(&builder, "Accept: */*\r\n")
+    if !("accept" in headers) && !("Accept" in headers) {
+        fmt.sbprintf(&builder, "accept: */*\r\n")
     }
-    if !("Accept-Encoding" in headers) {
-        fmt.sbprintf(&builder, "Accept-Encoding: deflate, gzip\r\n")
+    if !("accept-encoding" in headers) && !("Accept-Encoding" in headers) {
+        fmt.sbprintf(&builder, "accept-encoding: deflate, gzip\r\n")
     }
     should_keep_alive := false
-    if !("Connection" in headers) {
-        fmt.sbprintf(&builder, "Connection: keep-alive\r\n")
+    if !("connection" in headers) && !("Connection" in headers) {
+        fmt.sbprintf(&builder, "connection: keep-alive\r\n")
         should_keep_alive = true
-    } else if headers["Connection"] == "keep-alive" {
+    } else if headers["connection"] == "keep-alive" || headers["Connection"] == "keep-alive" {
         should_keep_alive = true
     }
     for header_key, header_name in headers {
         fmt.sbprintf(&builder, "%s: %s\r\n", header_key, header_name)
     }
 
-    // write_request line 6172
-    // if (!basic_auth_password_.empty() || !basic_auth_username_.empty()) {
-    //     if (!req.has_header("Authorization")) {
-    //       req.headers.insert(make_basic_authentication_header(
-    //           basic_auth_username_, basic_auth_password_, false));
-    //     }
-    //   }
-
-    // compression see line 3566 write_content_chunked
-
+    // Add Cookies
+    cookie_num := len(slice.map_keys(cookies))
+    if cookie_num > 0 {
+        fmt.sbprint(&builder, "cookie: ")
+        sep := "; "
+        cookies_done := 0
+        for ck, cv in cookies {
+            cookies_done += 1
+            if cookies_done == cookie_num {
+                sep = ""
+            }
+            fmt.sbprintf(&builder, "%s=%s%s", ck, cv, sep)
+        }
+        fmt.sbprint(&builder, "\r\n")
+    }
     headers_until := strings.builder_len(builder)
 
     // Build Body
-
+    fmt.sbprintf(&builder, "content-length: %d\r\n", len(body_data))
+    fmt.sbprint(&builder, "\r\n")
+    if len(body_data) > 0 {
+        strings.write_bytes(&builder, body_data)
+    }
 
     log.info(strings.to_string(builder))
     req := new(Request)
