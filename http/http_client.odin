@@ -80,7 +80,6 @@ make_session :: proc() -> (sess: ^Session, err: Http_Error) {
 	ctx: SSL_CTX
 	if SSL_SUPPORT {
 		OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nil)
-		OPENSSL_config(nil)
 
 		ctx = SSL_CTX_new(TLS_client_method())
 		if ctx == nil {
@@ -90,7 +89,6 @@ make_session :: proc() -> (sess: ^Session, err: Http_Error) {
 		SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nil)
 		SSL_CTX_set_verify_depth(ctx, 4)
 		SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION | SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION)
-		SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION)
 
 		if !load_system_certs(ctx) {
 			return nil, .SSL_Loading_Certs_Failed
@@ -134,7 +132,7 @@ delete_session :: proc(sess: ^Session) {
 // Timeout_ms, -1 = wait infinitely, 0 = no wait (not a good idea)
 request_prepare :: proc(
 	method: Http_Method,
-	url_target: string,
+	url: string,
 	headers: map[string]string = nil,
 	cookies: map[string]string = nil,
 	body_data: []u8 = nil,
@@ -144,40 +142,45 @@ request_prepare :: proc(
 	Http_Error,
 ) {
 	assert(timeout_ms >= 0, "Currently only supports positive timeouts, until bug in binding is fixed")
-	url, url_error := url_parse(url_target)
+	purl, url_error := url_parse(url)
 	if url_error != .None {
-		url_free(url)
+		url_free(purl)
 		return nil, url_error
 	}
 
-	use_https := url.scheme == "https" ? true : false
+	use_https := purl.scheme == "https" ? true : false
 
 	// Build Header
 	builder := strings.make_builder(
 		0,
-		(len(url_target) + cap(headers) + len(body_data) + cap(cookies)) * 2,
+		(len(url) + cap(headers) + len(body_data) + cap(cookies)) * 2,
 	) // This is just a rough size estimate
 	defer strings.destroy_builder(&builder)
 
 	fmt.sbprintf(
 		&builder,
-		"%s %s?%s#%s %s\r\n",
+		"%s %s",
 		method_to_string(method),
-		url.path,
-		url.query,
-		url.fragment,
-		HTTP_VERSION_STR,
+		purl.path != "" ? purl.path : "/",
 	)
+	if purl.query != "" {
+		fmt.sbprintf(&builder, "?%s", purl.query)
+	}
+	if purl.fragment != "" {
+		fmt.sbprintf(&builder, "#%s", purl.fragment)
+	}
+	fmt.sbprintf(&builder, " %s\r\n", HTTP_VERSION_STR)
+
 	host: string
-	if (!use_https && url.port != HTTP_PORT) || (use_https && url.port != HTTPS_PORT) {
-		host = fmt.tprintf("%s:%d", url.hostname, url.port)
+	if (!use_https && purl.port != HTTP_PORT) || (use_https && purl.port != HTTPS_PORT) {
+		host = fmt.tprintf("%s:%d", purl.hostname, purl.port)
 	} else {
-		host = fmt.tprintf("%s", url.hostname)
+		host = fmt.tprintf("%s", purl.hostname)
 	}
 	fmt.sbprintf(&builder, "host: %s\r\n", host)
 	fmt.sbprintf(
 		&builder,
-		"user-agent: odinhttp/%s.%s.%s\r\n",
+		"user-agent: odinhttp/%d.%d.%d\r\n",
 		ODINHTTP_VERSION_MAJOR,
 		ODINHTTP_VERSION_MINOR,
 		ODINHTTP_VERSION_PATCH,
@@ -224,10 +227,9 @@ request_prepare :: proc(
 		strings.write_bytes(&builder, body_data)
 	}
 
-	log.info(strings.to_string(builder))
 	req := new(Request)
 	req.method = method
-	req.url = url
+	req.url = purl
 	req.buffer = slice.clone(builder.buf[:])
 	req.timeout_ms = timeout_ms
 	req.keep_alive = should_keep_alive
@@ -304,16 +306,19 @@ request :: proc(sess: ^Session, req: ^Request) -> (res: ^Response, error: Http_E
 		defer delete(chost)
 		resolve_success := net.ResolveHost(&ipaddr, chost, req.url.port)
 		if resolve_success == -1 {
+			log.errorf("SDLNet_ResolveHost %s", net.GetError())
 			return nil, .Could_Not_Resolve_Host
 		}
 
 		socket = net.TCP_Open(&ipaddr)
-		if socket != nil {
+		if socket == nil {
+			log.errorf("SDLNet_TCP_Open %s", net.GetError())
 			return nil, .Socket_Creation_Error
 		}
 
 		add_socket_success = net.TCP_AddSocket(sess.socket_set, socket)
 		if add_socket_success == -1 {
+			log.errorf("SDLNet_TCP_AddSocket %s", net.GetError())
 			return nil, .Socket_Creation_Error
 		}
 
@@ -454,67 +459,75 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
 
 			// Parse body
 			body_start := bytes.buffer_length(&growbuffer)
-			body_length_compressed := strconv.parse_int(res.headers["content-length"]) or_else 0
+			clength := res.headers["content-length"]
+			body_length_compressed := strconv.parse_int(clength) or_else 0
 			chunked := strings.contains(res.headers["transfer-encoding"], "chunked")
 			compressed_buffer: []u8
 			defer delete(compressed_buffer)
 			if chunked {
 				// Hard case: Chunked transport encoding, load data in chunks and merge them
-				chunks := bytes.Buffer{}
-				defer bytes.buffer_destroy(&chunks)
+				all_chunks := bytes.Buffer{}
+				chunk_buffer : []u8
+				defer bytes.buffer_destroy(&all_chunks)
+				defer delete(chunk_buffer)
 				for {
 					read_line(sock, &line_buffer) or_return
 					chunk_bytes := parse_chunk_line(line_buffer[:]) or_return
 					chunk_length := int(chunk_bytes) + 2
-					if compressed_buffer == nil {
+					if chunk_buffer == nil {
 						// Make sure we are not allocating the buffer all the time again
-						compressed_buffer = make([]u8, max(chunk_length, 1024))
-					} else if len(compressed_buffer) < chunk_length {
-						delete(compressed_buffer)
-						compressed_buffer = make([]u8, chunk_length)
+						chunk_buffer = make([]u8, max(chunk_length, 1024))
+					} else if len(chunk_buffer) < chunk_length {
+						delete(chunk_buffer)
+						chunk_buffer = make([]u8, chunk_length)
 					}
-					read_bytes(sock, &compressed_buffer, i32(chunk_length))
+					read_bytes(sock, raw_data(chunk_buffer), i32(chunk_length))
 					if chunk_bytes == 0 {
 						// Last chunk
-						delete(compressed_buffer)
 						break
 					}
 					// Discard the crlf sequence at the end of the chunk
-					bytes.buffer_write(&chunks, compressed_buffer[:chunk_bytes])
+					bytes.buffer_write(&all_chunks, chunk_buffer[:chunk_bytes])
 				}
-				// now write back full contents of stringbuilder to compressed buffer
-				compressed_buffer = slice.clone(bytes.buffer_to_bytes(&chunks))
+				// now write back full contents of all chunks to compressed buffer
+				compressed_buffer = slice.clone(bytes.buffer_to_bytes(&all_chunks))
 			} else if body_length_compressed > 0 {
 				// Easy case: We get body length, just load everything into one buffer
-				compressed_buffer := make([]u8, body_length_compressed)
-				read_bytes(sock, &compressed_buffer, i32(body_length_compressed)) or_return
+				compressed_buffer = make([]u8, body_length_compressed)
+				read_bytes(sock, raw_data(compressed_buffer), i32(body_length_compressed)) or_return
 			}
 
 			// Decompress body
 			compression := res.headers["content-encoding"]
-			decompressed := bytes.Buffer{}
-			defer bytes.buffer_destroy(&decompressed)
-			switch compression {
-			case "gzip":
-				err := gzip.load(
-					slice = compressed_buffer,
-					buf = &decompressed,
-					known_gzip_size = len(compressed_buffer),
-				)
-				if err != nil {
-					return nil, .Response_Decompression_Failed
+			if compression == "" {
+				// No compression, so "compressed_buffer" actually contains uncompressed
+				bytes.buffer_write(&growbuffer, compressed_buffer)
+			} else {
+				decompressed := bytes.Buffer{}
+				defer bytes.buffer_destroy(&decompressed)
+				switch compression {
+				case "gzip":
+					err := gzip.load(
+						slice = compressed_buffer,
+						buf = &decompressed,
+						known_gzip_size = len(compressed_buffer),
+					)
+					if err != nil {
+						return nil, .Response_Decompression_Failed
+					}
+				case "deflate":
+					err := zlib.inflate(input = compressed_buffer, buf = &decompressed)
+					if err != nil {
+						return nil, .Response_Decompression_Failed
+					}
+				case "br":
+					return nil, .Content_Encoding_Not_Supported
+				case "compress":
+					return nil, .Content_Encoding_Not_Supported
+
 				}
-			case "deflate":
-				err := zlib.inflate(input = compressed_buffer, buf = &decompressed)
-				if err != nil {
-					return nil, .Response_Decompression_Failed
-				}
-			case "br":
-				return nil, .Content_Encoding_Not_Supported
-			case "compress":
-				return nil, .Content_Encoding_Not_Supported
+				bytes.buffer_write(&growbuffer, bytes.buffer_to_bytes(&decompressed))
 			}
-			bytes.buffer_write(&growbuffer, bytes.buffer_to_bytes(&decompressed))
 
 			// Store everything in res
 			res.buffer = slice.clone(bytes.buffer_to_bytes(&growbuffer))
@@ -604,7 +617,7 @@ read_byte :: proc(sock: Socket, b: ^u8) -> Http_Error {
 }
 
 @(private)
-read_bytes :: proc(sock: Socket, b: ^[]u8, len: i32) -> Http_Error {
+read_bytes :: proc(sock: Socket, b: rawptr, len: i32) -> Http_Error {
 	if SSL_SUPPORT && sock.ssl != nil {
 		if SSL_pending(sock.ssl) > 0 {
 			SSL_read(sock.ssl, b, len)
@@ -639,17 +652,17 @@ parse_response_line :: proc(res: ^Response, line: []u8) -> Http_Error {
 			v_start = i + 1
 			mode += 1
 		}
-		if char == ' ' && mode == 1 {
+		else if char == ' ' && mode == 1 {
 			v_end = i
 			sc_start = i + 1
 			mode += 1
 		}
-		if char == ' ' && mode == 2 {
+		else if char == ' ' && mode == 2 {
 			sc_end = i
 			r_start = i + 1
 			mode += 1
 		}
-		if char == '\r' && mode == 3 {
+		else if char == '\r' && mode == 3 {
 			r_end = i
 			break
 		}
@@ -683,8 +696,8 @@ parse_header_line :: proc(res: ^Response, line: []u8) -> (
 		err = .Response_Header_Invalid
 		return
 	}
-	key = strings.to_lower(splits[0])
-	value = strings.trim_space(splits[1])
+	key = strings.to_lower(splits[0]) // always allocates
+	value = strings.trim_space(splits[1]) // never allocates
 	if key == "set-cookie" {
 		delete(key)
 		cookie := strings.split_n(value, "=", 2, context.temp_allocator)
@@ -698,7 +711,7 @@ parse_header_line :: proc(res: ^Response, line: []u8) -> (
 		res.cookies[key] = value
 		delete(vtmp)
 	} else {
-		res.headers[key] = value
+		res.headers[key] = strings.clone(value)
 	}
 	err = .None
 	return
