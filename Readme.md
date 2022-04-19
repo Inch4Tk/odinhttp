@@ -3,90 +3,45 @@ This library provides a lightweight http client written in Odin. The underlying 
 
 
 ## Installation
+**Windows Note:** Before running your program make sure the following dlls are somewhere on the environment path or in the working directory:
+- SDL2.dll (from odin/vendor/sdl2)
+- SDL2_net.dll (from odin/vendor/sdl2/net)
+- If you want to send https requests, see SSL Support section
+
 ```
-odin build http -build-mode:dll -out:build/http.dll -show-timings
+// inside odin/shared
+// git clone -b <tagname> <repository>
+// then in project:
+import http "shared:odinhttp/http"
+
+// alternatively to run tests, inside odinhttp folder:
+// for some reason the builtin test does not work (?)
+odin run test
 ```
 
 ## Example
+For a more complete example check example/example.odin
 ```
-import json "core:encoding/json"
-import http "shared:odinhttp/http"
+// Before you send requests always make a session, keep this session around
+// for the time you want to make requests.
+// Right now you can (should) only have a single session and it is not threadsafe.
+session := http.make_session() or_return
+defer http.delete_session(session)
 
-some_proc :: proc () {
-    // Error handling just forwarded to "caller procedure"
+// Example: Simple get request
+req := http.request_prepare(.Get, "https://xyz.com/404") or_return
+fmt.printf("Request:\n%s\n", req.buffer)
 
-    // Before you send requests always make a session, keep this session around 
-    // for the time you want to make requests.
-    // Right now you can (should) only have a single session and it is not threadsafe.
-    session := http.make_session() or_return
-    defer http.delete_session(session)
+res := http.request(session, req) or_return
+fmt.printf("Response in %d milliseconds:\n%s\n", res.elapsed_ms, res.buffer)
 
-    // Example 1
-    // Simple get request
-    req := http.request_prepare(.Get, "https://xyz.com/404") or_return
-    fmt.printf("Request:\n%s\n", req.buffer)
-
-    res := http.request(session, req) or_return
-    fmt.printf("Response in %d milliseconds:\n%s\n", res.elapsed_ms, res.buffer)
-    
-    defer http.request_delete(req)
-    defer http.response_delete(res)
-
-    fmt.println("----")
-
-    // Example 2
-    // Simple post request
-    req2 := http.request_prepare(.Post, "https://xyz.com/404?param=one&param2=two") or_return
-    fmt.printf("Request:\n%s\n", req2.buffer)
-    
-    res2 := http.request(session, req2) or_return
-    fmt.printf("Response in %d milliseconds:\n%s\n", res2.elapsed_ms, res2.buffer)
-
-    defer http.request_delete(req2)
-    defer http.response_delete(res2)
-
-    fmt.println("----")
-
-    // Example 3
-    // Randomly complex post request to show parameters
-    headers := make(map[string]string)
-    defer delete(headers)
-    token := "qwerasdf"
-    headers["authorization"] = fmt.tprintf("Bearer %s", token)
-    headers["accept-encoding"] = "identity"
-    headers["connection"] = "close"
-    headers["content-type"] = "application/json"
-
-    cookies := make(map[string]string)
-    defer delete(cookies)
-    cookies["some_random_cookie] = "with_random_value"
-    
-    json_body := make(map[string]int)
-    defer delete(json_body)
-    json_body["key1"] = 0
-    json_body["key2"] = 123
-    json_body["key3"] = 987
-    body_data := json.marshal(json_body)
-
-    req3 := http.request_prepare(.Post, "https://xyz.com/404", 
-        headers=headers,
-        cookies=cookies,
-        body_data=body_data,
-        timeout_ms=3000,
-    ) or_return
-    fmt.printf("Request:\n%s\n", req3.buffer)
-    
-    res3 := http.request(session, req3) or_return
-    fmt.printf("Response in %d milliseconds:\n%s\n", res3.elapsed_ms, res3.buffer)
-
-    defer http.request_delete(req3)
-    defer http.response_delete(res3)
-}
+defer http.request_delete(req)
+defer http.response_delete(res)
 ```
 
 ## List of supported behavior
 - Http 1.1
-- SSL, TLS
+- SSL/TLS (compile with SSL Support see below)
 - All methods (except CONNECT)
 - Headers
 - Params
@@ -157,17 +112,30 @@ For building bodies with other complex types refer to here:
 
 Content-Length header will be set automatically based on the body size
 
-## SSL Support
-If you want SSL support you need a valid OpenSSL distribution in your system. For windows it is basically impossible to find trustworthy binaries which include static libraries. 
+## SSL Support 
+If you want SSL support you need a valid OpenSSL distribution in your system. 
+The recommended version is 3.0.2 (latest as of 2022/04/18), which is the version used for developing. Any 3.0.x version should work, no other versions are tested.
 
-The recommended version is 3.0.2 (current as of 2022/04/18), which is the version used for developing. Any 3.0.x version should work, no other versions are tested.
+If you want to build with ssl support add the following to your build command:
+```-define:SSL_SUPPORT=true```
+If you have ssl support disabled all calls with "https" as schema will unpredictably fail or crash.
+
+
+### ... and Windows
+For windows it is basically impossible to find trustworthy binaries which include static libraries. For exactly the same reason I decided to not upload my own build of them into git.
 
 This means you have to compile and install them on your own. Follow this official guide: [https://github.com/openssl/openssl#build-and-install](https://github.com/openssl/openssl#build-and-install).
 
-If you want to build without ssl support add the following to your build command:
-```-define:SSL_SUPPORT=false```
+Then copy libcrypto.lib and libssl.lib into the lib folder of the http project.
 
-If you have ssl support disabled all calls with https as schema will unpredictably fail or crash.
+Furthermore make sure that the following files are on the environment path or inside your project folder:
+- libssl-3-x64.dll (from openssl/bin)
+- libcrypto-3-x64.dll (from openssl/bin)
+
+### ... and Unix
+Not tested, but it should work out of the box if you have openssl installed. Most likely you will need to have version 3.0.x, which you will probably have to manually install since the latest official binaries on most distros should be version 1.1.1.
+
+Open an issue if the paths inside ssl.odin are not correct.
 
 ### SSL and timeouts
 If you set the timeout in your request, this will have no effect on ssl handshake timeouts. The default OpenSSL timeout is set to 300 seconds. If you want to modify this value, call `SSL_CTX_set_timeout(ctx, long)` on the ssl_ctx after calling make_session.
