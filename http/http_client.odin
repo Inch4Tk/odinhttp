@@ -58,17 +58,23 @@ FullSDLTCPSocket :: struct {
 
 // Make and initialize a new session. The session stores keep-alive connections (default in http/1.1)
 // and handles sdl2 init and teardown.
-make_session :: proc() -> (^Session, Http_Error) {
+make_session :: proc() -> (sess: ^Session, err: Http_Error) {
 	// SDL Init
 	success := net.Init()
 	if success == -1 {
 		return nil, .SDL2Init_Failed
 	}
+    defer if err != .None {
+        net.Quit()
+    }
 
 	socket_set := net.AllocSocketSet(10)
 	if socket_set == nil {
 		return nil, .Socket_Set_Creation_Error
 	}
+    defer if err != .None {
+        net.FreeSocketSet(socket_set)
+    }
 
 	// OpenSSL Init
 	ctx: SSL_CTX
@@ -92,7 +98,7 @@ make_session :: proc() -> (^Session, Http_Error) {
 	}
 
 	// Store everything in our session struct
-	sess := new(Session)
+	sess = new(Session)
 	sess.connections = make(map[string]Socket)
 	sess.socket_set = socket_set
 	sess.ssl_ctx = ctx
@@ -114,7 +120,7 @@ delete_session :: proc(sess: ^Session) {
 	delete(sess.connections)
 	net.Quit()
 	free(sess)
-	// openssl will deinit by itself since version 1.1.0
+	// openssl will deinit by itself since version 1.1.0 (claimed at least)
 }
 
 // Prepare a request before sending it
@@ -122,7 +128,7 @@ delete_session :: proc(sess: ^Session) {
 // This function will allocate a new request with the default allocator.
 // The user is responsible for freeing the allocated memory of the returned request
 // (e.g. using request_delete()).
-// Make sure you take care to delete all supplied headers/params/cookies in the maps you supplied yourself
+// Make sure you take care to delete all supplied headers/cookies in the maps you supplied yourself
 // deleting the request does not touch those.
 //
 // Timeout_ms, -1 = wait infinitely, 0 = no wait (not a good idea)
@@ -130,9 +136,8 @@ request_prepare :: proc(
 	method: Http_Method,
 	url_target: string,
 	headers: map[string]string = nil,
-	params: map[string]string = nil,
-	body_data: []u8 = nil,
 	cookies: map[string]string = nil,
+	body_data: []u8 = nil,
 	timeout_ms: i32 = 60000,
 ) -> (
 	^Request,
@@ -150,7 +155,7 @@ request_prepare :: proc(
 	// Build Header
 	builder := strings.make_builder(
 		0,
-		(len(url_target) + cap(headers) + cap(params) + len(body_data) + cap(cookies)) * 2,
+		(len(url_target) + cap(headers) + len(body_data) + cap(cookies)) * 2,
 	) // This is just a rough size estimate
 	defer strings.destroy_builder(&builder)
 
