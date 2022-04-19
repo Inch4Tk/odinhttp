@@ -7,10 +7,13 @@ import "core:strconv"
 import "core:slice"
 import "core:c"
 import "core:log"
+import "core:bytes"
+import gzip "core:compress/gzip"
+import zlib "core:compress/zlib"
 import net "vendor:sdl2/net"
 
 Request :: struct {
-    method: Http_Method,
+    method:        Http_Method,
     url:           ^Url,
     buffer:        []u8,
     headers_until: u32,
@@ -404,8 +407,8 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
             defer delete(line_buffer)
 
             res = new(Response)
-            growbuffer := strings.make_builder(0, 512)
-            defer strings.destroy_builder(&growbuffer)
+            growbuffer := bytes.Buffer{}
+            defer bytes.buffer_destroy(&growbuffer)
             // Make sure to clean up if we get some error
             defer if err != .None {
                 log.errorf("Failed parsing response at following line %s", line_buffer)
@@ -419,7 +422,7 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
             parse_response_line(res, line_buffer[:]) or_return
 
             // Store response line, read first header line
-            strings.write_bytes(&growbuffer, line_buffer[:])
+            bytes.buffer_write(&growbuffer, line_buffer[:])
             read_line(sock, &line_buffer) or_return
             for !(len(line_buffer) == 2 && string(line_buffer[:]) == "\r\n") {
                 // Loop reads until it hits an empty line (=\r\n), which is the line before
@@ -427,7 +430,7 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
                 hkey, hval := parse_header_line(res, line_buffer[:]) or_return
 
                 // Store last line, read next header line
-                strings.write_bytes(&growbuffer, line_buffer[:])
+                bytes.buffer_write(&growbuffer, line_buffer[:])
                 read_line(sock, &line_buffer) or_return
             }
             if hval := res.headers["connection"]; hval == "close" {
@@ -440,15 +443,15 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
             }
 
             // Parse body
-            body_start := strings.builder_len(growbuffer)
+            body_start := bytes.buffer_length(&growbuffer)
             body_length_compressed := strconv.parse_int(res.headers["content-length"]) or_else 0
             chunked := strings.contains(res.headers["transfer-encoding"], "chunked")
             compressed_buffer: []u8
             defer delete(compressed_buffer)
             if chunked {
                 // Hard case: Chunked transport encoding, load data in chunks and merge them
-                chunks := strings.make_builder(0, 1024)
-                defer strings.destroy_builder(&chunks)
+                chunks := bytes.Buffer{}
+                defer bytes.buffer_destroy(&chunks)
                 for {
                     read_line(sock, &line_buffer) or_return
                     chunk_bytes := parse_chunk_line(line_buffer[:]) or_return
@@ -467,33 +470,44 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
                         break
                     }
                     // Discard the crlf sequence at the end of the chunk
-                    strings.write_bytes(&chunks, compressed_buffer[:chunk_bytes])
+                    bytes.buffer_write(&chunks, compressed_buffer[:chunk_bytes])
                 }
                 // now write back full contents of stringbuilder to compressed buffer
-                compressed_buffer = slice.clone(growbuffer.buf[:])
+                compressed_buffer = slice.clone(bytes.buffer_to_bytes(&chunks))
             } else if body_length_compressed > 0 {
                 // Easy case: We get body length, just load everything into one buffer
                 compressed_buffer := make([]u8, body_length_compressed)
                 read_bytes(sock, &compressed_buffer, i32(body_length_compressed)) or_return
             }
 
+            // Decompress body
             compression := res.headers["content-encoding"]
-            // TODO
+            decompressed := bytes.Buffer{}
+            defer bytes.buffer_destroy(&decompressed)
             switch compression {
             case "gzip":
+                err := gzip.load(
+                    slice = compressed_buffer,
+                    buf = &decompressed,
+                    known_gzip_size = len(compressed_buffer),
+                )
+                if err != nil {
+                    return nil, .Response_Decompression_Failed
+                }
             case "deflate":
+                err := zlib.inflate(input = compressed_buffer, buf = &decompressed)
+                if err != nil {
+                    return nil, .Response_Decompression_Failed
+                }
             case "br":
                 return nil, .Content_Encoding_Not_Supported
             case "compress":
                 return nil, .Content_Encoding_Not_Supported
             }
-
-            // TODO
-            // strings.write_bytes(&growbuffer, compressed_buffer)
-
+            bytes.buffer_write(&growbuffer, bytes.buffer_to_bytes(&decompressed))
 
             // Store everything in res
-            res.buffer = slice.clone(growbuffer.buf[:])
+            res.buffer = slice.clone(bytes.buffer_to_bytes(&growbuffer))
             res.body = body_length_compressed > 0 ? res.buffer[body_start:] : nil
             return res, .None
         } else if numready > 0 {
@@ -681,19 +695,16 @@ parse_header_line :: proc(res: ^Response, line: []u8) -> (
 }
 
 @(private)
-parse_chunk_line :: proc(line: []u8) -> (
-    bytes: i32,
-    err: Http_Error,
-) {
+parse_chunk_line :: proc(line: []u8) -> (bytes: i32, err: Http_Error) {
     check_line_ending(line) or_return
     no_terminator_line := line[len(line) - 2:]
 
     splits := strings.split(string(no_terminator_line), ";", context.temp_allocator)
     bytes = i32(strconv.parse_int(splits[0], 16) or_else -1)
     if bytes == -1 {
-        return bytes, .Chunk_Header_Invalid
+        return bytes, .Response_Chunk_Header_Invalid
     }
-    if len(splits) > 1  {
+    if len(splits) > 1 {
         // TODO: to support chunk extensions, take splits[1:], then add a return field for them
     }
     return bytes, .None
