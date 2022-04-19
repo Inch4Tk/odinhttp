@@ -2,6 +2,7 @@ package http
 
 import "core:strings"
 import "core:strconv"
+import "core:fmt"
 
 SCHEME_CHARS :: "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ" + "0123456789" + "+-."
 Url :: struct {
@@ -22,10 +23,30 @@ url_free :: proc(url: ^Url) {
 	free(url)
 }
 
+// Returns a temporary allocated string from an url object
+url_to_tstring :: proc(url: ^Url) -> string {
+	use_https := url.scheme == "https" ? true : false
+	if (!use_https && url.port != HTTP_PORT) || (use_https && url.port != HTTPS_PORT) {
+		return fmt.tprintf(
+			"%s://%s:%d%s?%s#%s",
+			url.scheme,
+			url.hostname,
+			url.port,
+			url.path,
+			url.query,
+			url.fragment,
+		)
+	} else {
+		return fmt.tprintf("%s://%s%s?%s#%s", url.scheme, url.hostname, url.path, url.query, url.fragment)
+	}
+}
+
 // Accepts a string Url and parses it into separate url components.
 //
 // Allocates the contents of Url struct as necessary. The returned Url can be freed with url_free()
-// Make sure to use url_free() on the returned url, even if Url_Parsing_Error is not None
+// Make sure to use url_free() on the returned url, even if Url_Parsing_Error is not None.
+//
+// This function definitely does not handle all improperly formed urls and will not error reliably on them.
 //
 // Loosely based on https://github.com/python/cpython/blob/f5542ecf6d340eaaf86f31d90a7a7ff7a99f25a2/Lib/urllib/parse.py#L437
 url_parse :: proc(to_parse: string, default_scheme: string = "https") -> (^Url, Http_Error) {
@@ -85,6 +106,8 @@ url_parse :: proc(to_parse: string, default_scheme: string = "https") -> (^Url, 
 		url.port = HTTP_PORT
 	} else if url.scheme == "https" {
 		url.port = HTTPS_PORT
+	} else {
+		return url, .Url_Invalid_Scheme
 	}
 
 	// Check for fragments in rest of url

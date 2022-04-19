@@ -2,7 +2,7 @@ package http
 
 import "core:c"
 
-SSL_SUPPORT :: #config(SSL_SUPPORT, true)
+SSL_SUPPORT :: #config(SSL_SUPPORT, false)
 
 ODINHTTP_VERSION_MAJOR :: 0
 ODINHTTP_VERSION_MINOR :: 1

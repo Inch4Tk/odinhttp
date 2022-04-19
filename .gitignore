@@ -4,5 +4,7 @@ lib/
 *.lib
 *.exe
 *.obj
+*.pdb
+*.dll
 ols.json
 .vscode/
