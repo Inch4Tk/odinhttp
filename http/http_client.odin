@@ -13,6 +13,8 @@ import zlib "core:compress/zlib"
 import net "vendor:sdl2/net"
 
 Request :: struct {
+	// Method and url are just here for informational use.
+	// If you want to change them build a new request.
 	method:        Http_Method,
 	url:           ^Url,
 	buffer:        []u8,
@@ -494,6 +496,7 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
 				}
 				// now write back full contents of all chunks to compressed buffer
 				compressed_buffer = slice.clone(bytes.buffer_to_bytes(&all_chunks))
+				body_length_compressed = len(compressed_buffer)
 			} else if body_length_compressed > 0 {
 				// Easy case: We get body length, just load everything into one buffer
 				compressed_buffer = make([]u8, body_length_compressed)
@@ -716,7 +719,7 @@ parse_header_line :: proc(res: ^Response, line: []u8) -> (
 @(private)
 parse_chunk_line :: proc(line: []u8) -> (bytes: i32, err: Http_Error) {
 	check_line_ending(line) or_return
-	no_terminator_line := line[len(line) - 2:]
+	no_terminator_line := line[:len(line) - 2]
 
 	splits := strings.split(string(no_terminator_line), ";", context.temp_allocator)
 	bytes = i32(strconv.parse_int(splits[0], 16) or_else -1)
