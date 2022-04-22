@@ -704,11 +704,9 @@ parse_header_line :: proc(res: ^Response, line: []u8) -> (
 			err = .Response_Header_Invalid
 			return
 		}
-		vtmp := value
 		key = strings.clone(cookie[0])
 		value = strings.clone(cookie[1])
 		res.cookies[key] = value
-		delete(vtmp)
 	} else {
 		res.headers[key] = strings.clone(value)
 	}
