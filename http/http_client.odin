@@ -486,7 +486,15 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
 						delete(chunk_buffer)
 						chunk_buffer = make([]u8, chunk_length)
 					}
-					read_bytes(sock, raw_data(chunk_buffer), i32(chunk_length))
+					read_so_far : i32 = 0
+					for read_so_far < i32(chunk_length) {
+						just_read, read_err := read_bytes(sock, raw_data(chunk_buffer[read_so_far:]), i32(chunk_length) - read_so_far)
+						if read_err != .None {
+							return nil, read_err
+						}
+						read_so_far += just_read
+					}
+
 					if chunk_bytes == 0 {
 						// Last chunk
 						break
@@ -500,7 +508,14 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
 			} else if body_length_compressed > 0 {
 				// Easy case: We get body length, just load everything into one buffer
 				compressed_buffer = make([]u8, body_length_compressed)
-				read_bytes(sock, raw_data(compressed_buffer), i32(body_length_compressed)) or_return
+				read_so_far : i32 = 0
+				for read_so_far < i32(body_length_compressed) {
+					just_read, read_err := read_bytes(sock, raw_data(compressed_buffer[read_so_far:]), i32(body_length_compressed) - read_so_far)
+					if read_err != .None {
+						return nil, read_err
+					}
+					read_so_far += just_read
+				}
 			}
 
 			// Decompress body
@@ -621,15 +636,15 @@ read_byte :: proc(sock: Socket, b: ^u8) -> Http_Error {
 }
 
 @(private)
-read_bytes :: proc(sock: Socket, b: rawptr, len: i32) -> Http_Error {
+read_bytes :: proc(sock: Socket, b: rawptr, len: i32) -> (i32, Http_Error) {
 	if SSL_SUPPORT && sock.ssl != nil {
-		SSL_read(sock.ssl, b, len)
-		return .None
+		actually_read := SSL_read(sock.ssl, b, len)
+		return actually_read, .None
 	} else {
-		net.TCP_Recv(sock.socket, b, len)
-		return .None
+		actually_read := net.TCP_Recv(sock.socket, b, len)
+		return actually_read, .None
 	}
-	return .Socket_Read_Error
+	return 0, .Socket_Read_Error
 }
 
 @(private)
