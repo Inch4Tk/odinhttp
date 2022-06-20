@@ -10,8 +10,11 @@ when ODIN_OS == .Windows && SSL_SUPPORT {
 	foreign import libcrypto "../lib/libcrypto.lib"
 	foreign import libssl "../lib/libssl.lib"
 } else when SSL_SUPPORT {
-	foreign import libcrypto "system:libcrypto"
-	foreign import libssl "system:libssl"
+	@(require)
+	foreign import libdl "system:dl"
+	@(require)
+	foreign import libcrypto "system:crypto"
+	foreign import libssl "system:ssl"
 }
 
 SSL_METHOD :: distinct rawptr
