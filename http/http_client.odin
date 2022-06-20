@@ -528,8 +528,8 @@ handle_protocol :: proc(sess: ^Session, sock: Socket, req: ^Request) -> (
 				defer bytes.buffer_destroy(&decompressed)
 				switch compression {
 				case "gzip":
-					err := gzip.load(
-						slice = compressed_buffer,
+					err := gzip.load_from_bytes(
+						data = compressed_buffer,
 						buf = &decompressed,
 						known_gzip_size = len(compressed_buffer),
 					)
