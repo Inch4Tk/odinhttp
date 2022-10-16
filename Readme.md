@@ -5,7 +5,7 @@ This library provides a lightweight http client written in Odin. The underlying 
 ## Installation
 ```
 // inside odin/shared
-// git clone -b latest https://github.com/Inch4Tk/odinhttp
+// git clone -b v0.1.3 https://github.com/Inch4Tk/odinhttp
 // then in project:
 import http "shared:odinhttp/http"
 
