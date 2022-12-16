@@ -153,11 +153,11 @@ request_prepare :: proc(
 	use_https := purl.scheme == "https" ? true : false
 
 	// Build Header
-	builder := strings.make_builder(
+	builder := strings.builder_make_len_cap(
 		0,
 		(len(url) + cap(headers) + len(body_data) + cap(cookies)) * 2,
 	) // This is just a rough size estimate
-	defer strings.destroy_builder(&builder)
+	defer strings.builder_destroy(&builder)
 
 	fmt.sbprintf(&builder, "%s %s", method_to_string(method), purl.path != "" ? purl.path : "/")
 	if purl.query != "" {
@@ -201,7 +201,8 @@ request_prepare :: proc(
 	}
 
 	// Add Cookies
-	cookie_num := len(slice.map_keys(cookies))
+	sm, _ := slice.map_keys(cookies)
+	cookie_num := len(cookies)
 	if cookie_num > 0 {
 		fmt.sbprint(&builder, "cookie: ")
 		sep := "; "
